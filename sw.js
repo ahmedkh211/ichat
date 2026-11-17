@@ -1,5 +1,5 @@
 /* iChat — Service Worker */
-const VERSION = 'ichat-v1.0.3';
+const VERSION = 'ichat-v1.0.4';
 const CACHE = VERSION;
 const ASSETS = [
   './',
@@ -15,10 +15,16 @@ const ASSETS = [
   './icons/apple-touch-180.png'
 ];
 
-/* التثبيت: تخزين مسبق فقط — بلا skipWaiting ليعمل شريط التحديث */
+/* التثبيت: تخزين مسبق — cache:'reload' لتجاوز HTTP cache وضمان محتوى جديد */
 self.addEventListener('install', (e) => {
   e.waitUntil(
-    caches.open(CACHE).then((c) => c.addAll(ASSETS))
+    caches.open(CACHE).then((c) =>
+      Promise.all(ASSETS.map((u) =>
+        fetch(new Request(u, { cache: 'reload' }))
+          .then((r) => (r.ok ? c.put(u, r) : Promise.resolve()))
+          .catch(() => Promise.resolve())
+      ))
+    )
   );
 });
 
