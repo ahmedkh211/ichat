@@ -5,7 +5,7 @@
 'use strict';
 
 /* ===== ثوابت ===== */
-const APP_VERSION = 'v1.0.1';            // تزامن مع VERSION في sw.js
+const APP_VERSION = 'v1.0.2';            // تزامن مع VERSION في sw.js
 const LS_PREFS = 'ichat:prefs';
 const LS_CHATS = 'ichat:chats';
 const LS_UI    = 'ichat:ui';
@@ -792,6 +792,7 @@ function bindEvents() {
 /* ===== دورة تحديث Service Worker (إلزامية) ===== */
 let swReg = null;
 let wantReload = false; // إعادة التحميل فقط بعد قبول التحديث عمدًا
+let reloaded = false;   // علم منع حلقة إعادة التحميل
 function registerSW() {
   if (!('serviceWorker' in navigator)) return;
   navigator.serviceWorker.register('sw.js').then(reg => {
