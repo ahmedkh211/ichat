@@ -5,7 +5,7 @@
 'use strict';
 
 /* ===== ثوابت ===== */
-const APP_VERSION = 'v1.0.0';            // تزامن مع VERSION في sw.js
+const APP_VERSION = 'v1.0.1';            // تزامن مع VERSION في sw.js
 const LS_PREFS = 'ichat:prefs';
 const LS_CHATS = 'ichat:chats';
 const LS_UI    = 'ichat:ui';
