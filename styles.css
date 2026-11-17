@@ -122,7 +122,7 @@ body.has-update .tabs{top:calc(56px + var(--header-h))}
 /* ===== التبويبات ===== */
 .tabs{
   position:sticky;top:var(--header-h);z-index:35;
-  display:flex;position:relative;margin:14px var(--pad-x) 0;padding:5px;
+  display:flex;margin:14px var(--pad-x) 0;padding:5px;
   border-radius:var(--r-lg);border:1px solid var(--line);
 }
 .tab{

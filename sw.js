@@ -1,5 +1,5 @@
 /* iChat — Service Worker */
-const VERSION = 'ichat-v1.2.0';
+const VERSION = 'ichat-v1.2.1';
 const CACHE = VERSION;
 const ASSETS = [
   './',
