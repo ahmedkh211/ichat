@@ -5,13 +5,16 @@
 'use strict';
 
 /* ===== ثوابت ===== */
-const APP_VERSION = 'v1.1.0';            // تزامن مع VERSION في sw.js
+const APP_VERSION = 'v1.2.0';            // تزامن مع VERSION في sw.js
 const LS_PREFS = 'ichat:prefs';
 const LS_CHATS = 'ichat:chats';
 const LS_UI    = 'ichat:ui';
 const CHATS_CAP = 50;
 const BLOB_CAP = 120;
 const STREAM_FLUSH_MS = 420;   // تجميع تحديثات البث قبل رسمها
+const SRC_FILE_MAX = 12 * 1024 * 1024;  // 12MB لكل ملف (حد inline_data)
+const SRC_TOTAL_MAX = 14 * 1024 * 1024; // إجمالي المرفق لكل رسالة
+const IDB_NAME = 'ichat'; const IDB_STORE = 'sources';
 
 /* المقدمون: نوع gemini أو openai (متوافق) */
 const PROVIDERS = {
@@ -95,6 +98,7 @@ const DEFAULT_PREFS = {
     dahl: MODEL_PRESETS.dahl[0],
     custom: ''
   },
+  srcSel: {},                 // {srcId: true} — المصادر المحددة للإرسال
   usage: { d: '', req: 0, tok: 0 }
 };
 let prefs = JSON.parse(JSON.stringify(DEFAULT_PREFS));
@@ -106,7 +110,8 @@ const state = {
   pinned: true,       // تثبيت التمرير التلقائي
   conn: 'idle',       // idle | ok | busy | err
   retryDelay: 2000,
-  abort: null
+  abort: null,
+  sources: []         // [{id,name,type,size,ts}] — البيانات في IndexedDB
 };
 
 /* ===== طبقة التخزين (localStorage) ===== */
@@ -130,6 +135,7 @@ function loadPrefs() {
       keys: { ...DEFAULT_PREFS.keys, ...(raw.keys || {}) },
       models: { ...JSON.parse(JSON.stringify(DEFAULT_PREFS.models)), ...(raw.models || {}) },
       model: { ...DEFAULT_PREFS.model, ...(raw.model || {}) },
+      srcSel: { ...(raw.srcSel || {}) },
       usage: { ...DEFAULT_PREFS.usage, ...(raw.usage || {}) }
     };
   } catch (e) { prefs = JSON.parse(JSON.stringify(DEFAULT_PREFS)); }
@@ -173,6 +179,7 @@ function cacheDOM() {
   el.valVersion = $('#valVersion');
   el.modelChip = $('#modelChip'); el.modelChipName = $('#modelChipName');
   el.rowProvider = $('#rowProvider'); el.rowCustomBase = $('#rowCustomBase');
+  el.btnSources = $('#btnSources'); el.srcBadge = $('#srcBadge'); el.fileSources = $('#fileSources');
   el.modalKey = $('#modalKey'); el.inputKey = $('#inputKey'); el.btnSaveKey = $('#btnSaveKey');
   el.keyTitle = $('#keyTitle'); el.keyHint = $('#keyHint');
   el.modalInput = $('#modalInput'); el.inputTitle = $('#inputTitle');
@@ -261,6 +268,7 @@ function openOptList(title, options, current, onPick) {
 }
 /* قائمة الخيارات تُغلق بالنقر خارجها */
 function optOutside(ev) {
+  if (ev.target.closest?.('#btnSources')) return; // زر التبديل يدير حالته بنفسه
   if (!el.optList.contains(ev.target) && !ev.target.closest?.('.modal-backdrop')) closeOptList();
 }
 function openOptPanel() {
@@ -270,6 +278,226 @@ function openOptPanel() {
 function closeOptList() {
   el.optList.hidden = true;
   document.removeEventListener('click', optOutside, { capture: true });
+}
+
+/* ===== طبقة IndexedDB — بيانات المصادر (قد تكون كبيرة) ===== */
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const rq = indexedDB.open(IDB_NAME, 1);
+    rq.onupgradeneeded = () => { rq.result.createObjectStore(IDB_STORE, { keyPath: 'id' }); };
+    rq.onsuccess = () => resolve(rq.result);
+    rq.onerror = () => reject(rq.error);
+  });
+}
+function idbTx(mode, fn) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, mode);
+    const st = tx.objectStore(IDB_STORE);
+    const out = fn(st);
+    tx.oncomplete = () => { db.close(); resolve(out && out.result !== undefined ? out.result : out); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  }));
+}
+function idbPut(rec) { return idbTx('readwrite', st => st.put(rec)); }
+/* قراءة مبسطة موثوقة */
+function idbRead(id) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const rq = tx.objectStore(IDB_STORE).get(id);
+    rq.onsuccess = () => { db.close(); resolve(rq.result || null); };
+    rq.onerror = () => { db.close(); reject(rq.error); };
+  }));
+}
+function idbDel(id) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(id);
+    tx.oncomplete = () => { db.close(); resolve(true); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  }));
+}
+function idbAll() {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const rq = tx.objectStore(IDB_STORE).getAll();
+    rq.onsuccess = () => { db.close(); resolve(rq.result || []); };
+    rq.onerror = () => { db.close(); reject(rq.error); };
+  }));
+}
+
+/* ===== المصادر: تخزين + لوحة + اختيار ===== */
+const SRC_ICON = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9.5 18 20 6.5"/></svg>';
+function fmtSize(n) {
+  if (n >= 1024 * 1024) return (n / 1048576).toFixed(n >= 10 * 1048576 ? 0 : 1) + ' م';
+  if (n >= 1024) return Math.round(n / 1024) + ' ك';
+  return n + ' ب';
+}
+function srcStem(name) { return String(name || '').replace(/\.[^.]+$/, ''); }
+function normAr(s) {
+  return String(s || '').toLowerCase()
+    .replace(/[أإآ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
+    .replace(/\s+/g, ' ').trim();
+}
+function applySrcBtn() {
+  const n = state.sources.filter(s => prefs.srcSel[s.id]).length;
+  el.btnSources.classList.toggle('on', n > 0);
+  el.srcBadge.hidden = n === 0;
+  el.srcBadge.textContent = n;
+}
+async function loadSources() {
+  try {
+    const all = await idbAll();
+    state.sources = all.map(r => ({ id: r.id, name: r.name, type: r.type, size: r.size, ts: r.ts }))
+      .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  } catch (e) { state.sources = []; }
+}
+function renderSourcesPanel() {
+  el.optList.textContent = '';
+  const h = document.createElement('div');
+  h.style.cssText = 'font-weight:800;font-size:15px;padding:6px 14px 10px';
+  h.textContent = 'المصادر — كتبك وملاحظاتك';
+  el.optList.appendChild(h);
+  if (!state.sources.length) {
+    const e = document.createElement('div');
+    e.className = 'src-hint';
+    e.textContent = 'لا توجد ملفات بعد. أضف كتابًا بصيغة PDF أو ملفًا نصيًا، ثم علّم عليه ليستخدمه المساعد في الإجابات مع ذكر رقم الصفحة.';
+    el.optList.appendChild(e);
+  }
+  state.sources.forEach(s => {
+    const row = document.createElement('div');
+    row.className = 'src-row';
+    const chk = document.createElement('button');
+    chk.type = 'button';
+    chk.className = 'src-check' + (prefs.srcSel[s.id] ? ' on' : '');
+    chk.innerHTML = SRC_ICON;
+    chk.setAttribute('aria-label', 'تحديد ' + s.name);
+    chk.setAttribute('aria-pressed', prefs.srcSel[s.id] ? 'true' : 'false');
+    chk.onclick = () => {
+      prefs.srcSel[s.id] = !prefs.srcSel[s.id];
+      if (!prefs.srcSel[s.id]) delete prefs.srcSel[s.id];
+      savePrefs(); applySrcBtn(); renderSourcesPanel();
+    };
+    const nm = document.createElement('span');
+    nm.className = 'src-name';
+    nm.textContent = s.name;
+    nm.title = s.name;
+    const sz = document.createElement('span');
+    sz.className = 'src-size';
+    sz.textContent = fmtSize(s.size);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'del';
+    del.textContent = '×';
+    del.setAttribute('aria-label', 'حذف ' + s.name);
+    del.onclick = async ev => {
+      ev.stopPropagation();
+      const ok = await confirmBox('حذف مصدر', 'إزالة «' + s.name + '» نهائيًا من هذا الجهاز؟');
+      if (!ok) return;
+      try { await idbDel(s.id); } catch (e) {}
+      state.sources = state.sources.filter(x => x.id !== s.id);
+      delete prefs.srcSel[s.id];
+      savePrefs(); applySrcBtn(); renderSourcesPanel();
+      toast('حُذف المصدر', 'ok');
+    };
+    row.append(chk, nm, sz, del);
+    el.optList.appendChild(row);
+  });
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'opt add-opt';
+  add.textContent = '＋ إضافة ملف (PDF أو نص)';
+  add.onclick = () => el.fileSources.click();
+  el.optList.appendChild(add);
+  const hint = document.createElement('div');
+  hint.className = 'src-hint';
+  hint.textContent = 'المحدد ✓ يُرفق مع كل سؤال تلقائيًا. وإن لم تحدد شيئًا وذكرت اسم الكتاب في رسالتك، سيتعرف عليه التطبيق ويرفقه وحده. أفضل توافق: Google AI Studio.';
+  el.optList.appendChild(hint);
+  openOptPanel();
+}
+function openSourcesPanel() { renderSourcesPanel(); }
+function readAsDataURL(f) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(f);
+  });
+}
+function readAsText(f) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsText(f);
+  });
+}
+async function addSourceFiles(files) {
+  let added = 0;
+  for (const f of files) {
+    const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+    const isTxt = f.type === 'text/plain' || /\.(txt|md)$/i.test(f.name);
+    if (!isPdf && !isTxt) { toast('صيغة غير مدعومة — PDF أو نص فقط', 'err'); continue; }
+    if (f.size > SRC_FILE_MAX) { toast('«' + f.name + '» أكبر من 12 ميجابايت', 'err'); continue; }
+    if (state.sources.some(s => s.name === f.name && s.size === f.size)) { toast('الملف مضاف بالفعل', ''); continue; }
+    try {
+      const rec = {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+        name: f.name, size: f.size, ts: Date.now(),
+        type: isPdf ? 'application/pdf' : 'text/plain'
+      };
+      if (isPdf) {
+        const url = await readAsDataURL(f);
+        rec.data = String(url).split(',')[1] || '';
+      } else {
+        rec.data = await readAsText(f);
+      }
+      await idbPut(rec);
+      state.sources.push({ id: rec.id, name: rec.name, type: rec.type, size: rec.size, ts: rec.ts });
+      prefs.srcSel[rec.id] = true;
+      added++;
+    } catch (e) { toast('تعذّر قراءة «' + f.name + '»', 'err'); }
+  }
+  if (added) { savePrefs(); applySrcBtn(); toast('أُضيف ' + added + ' ملف إلى المصادر', 'ok'); }
+  if (el.optList.hidden === false && el.optList.textContent.includes('المصادر')) renderSourcesPanel();
+}
+/* المصادر المرفقة لهذه الرسالة: المحددة يدويًا، وإلا التعرف على الاسم في النص */
+function pickSources(text) {
+  let sel = state.sources.filter(s => prefs.srcSel[s.id]);
+  if (!sel.length && text) {
+    const t = normAr(text);
+    sel = state.sources.filter(s => t.includes(normAr(srcStem(s.name))));
+  }
+  const out = []; let total = 0;
+  for (const s of sel) {
+    if (total + s.size > SRC_TOTAL_MAX) { toast('حجم المصادر كبير — أُرفق جزء منها فقط', 'err'); break; }
+    total += s.size; out.push(s);
+  }
+  return out;
+}
+/* تعليمات الإرسال الموجَّه بالمصادر */
+const SRC_INSTRUCTION =
+  'أنت مساعد دراسة. اعتمد في إجابتك على المصادر (الكتب/الملفات) المرفقة، واجعلها المرجع الأول قبل معلوماتك العامة. ' +
+  'أجب بالعربية الواضحة، وفي نهاية كل معلومة اذكر مصدرها بين قوسين بهذا الشكل: (اسم الكتاب — صفحة N). ' +
+  'إن لم تجد الإجابة في المصادر فاذكر ذلك صراحة ثم أكمل من معلوماتك العامة.';
+/* تحويل المصادر إلى أجزاء حسب نوع المقدم (تجلب البيانات من IndexedDB) */
+const isPdfSrc = s => s.type === 'application/pdf';
+async function buildSourceParts(srcs, isGemini) {
+  const parts = [];
+  for (const s of srcs) {
+    try {
+      const rec = await idbRead(s.id);
+      if (!rec || !rec.data) continue;
+      if (isPdfSrc(s)) {
+        if (isGemini) parts.push({ inline_data: { mime_type: 'application/pdf', data: rec.data } });
+        else parts.push({ type: 'file', file: { filename: s.name, file_data: 'data:application/pdf;base64,' + rec.data } });
+      } else {
+        const txt = '[ملف: ' + s.name + ']\n' + rec.data;
+        if (isGemini) parts.push({ text: txt });
+        else parts.push({ type: 'text', text: txt });
+      }
+    } catch (e) {}
+  }
+  return parts;
 }
 
 /* مودال إدخال عام (يُعيد الوعد بالقيمة أو null) */
@@ -389,9 +617,12 @@ function bumpUsage(tokens) {
   savePrefs();
   renderUsage();
 }
+const BOLT_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" style="flex:none"><path d="M13 2 4.5 13.5H10L9 22l8.5-11.5H12z" fill="currentColor"/></svg>';
 function renderUsage() {
-  if (prefs.usage.d !== today()) { el.usagePill.textContent = '⚡ 0 طلب'; el.valUsage.textContent = '0 طلب'; return; }
-  el.usagePill.textContent = '⚡ ' + fmtNum(prefs.usage.req) + ' طلب · ~' + fmtNum(prefs.usage.tok) + ' ت';
+  if (prefs.usage.d !== today()) {
+    el.usagePill.innerHTML = BOLT_SVG + '<span>0 طلب</span>'; el.valUsage.textContent = '0 طلب'; return;
+  }
+  el.usagePill.innerHTML = BOLT_SVG + '<span>' + fmtNum(prefs.usage.req) + ' طلب · ~' + fmtNum(prefs.usage.tok) + ' ت</span>';
   el.usagePill.classList.add('tnum');
   el.valUsage.textContent = fmtNum(prefs.usage.req) + ' طلب · ~' + fmtNum(prefs.usage.tok) + ' توكن';
 }
@@ -504,6 +735,43 @@ function scrollBottom(force) {
 }
 
 /* بناء رسالة واحدة */
+const THINK_ICON = '<svg class="think-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6.5 6.5 0 0 0-4 11.6c.6.5 1 1.4 1 2.4h6c0-1 .4-1.9 1-2.4A6.5 6.5 0 0 0 12 3z"/></svg>';
+const CHEV_SVG = '<svg class="t-chev" viewBox="0 0 24 24" width="15" height="15"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ERR_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01" stroke-width="2.4"/></svg>';
+function thinkPreview(t) {
+  const s = String(t || '').replace(/\s+/g, ' ').trim();
+  return s.length > 64 ? s.slice(0, 62) + '…' : s;
+}
+/* يبني كتلة التفكير داخل الفقاعة (تُستخدم في البث والعرض المحفوظ) */
+function buildThinkBlock() {
+  const t = document.createElement('div');
+  t.className = 'think';
+  t.hidden = true;
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'think-head';
+  head.innerHTML = THINK_ICON + '<span class="t-line">يفكّر…</span>' + CHEV_SVG;
+  const body = document.createElement('div');
+  body.className = 't-body';
+  body.hidden = true;
+  head.onclick = () => {
+    body.hidden = !body.hidden;
+    t.classList.toggle('open', !body.hidden);
+  };
+  t.append(head, body);
+  return { block: t, head, body };
+}
+function setThinkUI(think, text, streaming) {
+  if (!text) { think.block.hidden = true; return; }
+  think.block.hidden = false;
+  const line = think.head.querySelector('.t-line');
+  if (streaming) {
+    line.innerHTML = esc(thinkPreview(text) || 'يفكّر') + '<span class="t-dots"><i></i><i></i><i></i></span>';
+  } else {
+    line.textContent = thinkPreview(text);
+  }
+  if (!think.body.hidden) think.body.textContent = text;
+}
 function msgNode(m) {
   const wrap = document.createElement('div');
   if (m.role === 'user') {
@@ -519,16 +787,45 @@ function msgNode(m) {
     av.innerHTML = SPARK_SVG;
     const b = document.createElement('div');
     b.className = 'bubble md';
-    b.innerHTML = md(m.text);
-    wrap.append(av, b);
-    if (m.fail) {
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = 'chip';
-      chip.textContent = '↻ إعادة المحاولة';
-      chip.onclick = () => retryLast();
-      wrap.appendChild(chip);
+    const think = buildThinkBlock();
+    if (m.think) {
+      setThinkUI(think, m.think, false);
+      think.body.textContent = m.think;
     }
+    const ans = document.createElement('div');
+    ans.className = 'ans';
+    if (m.fail) {
+      ans.innerHTML = md(m.text);
+      const box = document.createElement('div');
+      box.className = 'fail-box';
+      const fe = document.createElement('div');
+      fe.className = 'fail-err';
+      fe.innerHTML = ERR_ICON + '<span class="fmsg">' + esc(m.text) + '</span>';
+      box.appendChild(fe);
+      const acts = document.createElement('div');
+      acts.className = 'fail-actions';
+      const fb = nextFallback();
+      if (fb) {
+        const alt = document.createElement('button');
+        alt.type = 'button';
+        alt.className = 'chip';
+        alt.textContent = 'الإجابة بموديل آخر: ' + fb.model + ' ↻';
+        alt.onclick = () => fallbackRetry(fb);
+        acts.appendChild(alt);
+      }
+      const again = document.createElement('button');
+      again.type = 'button';
+      again.className = 'chip';
+      again.textContent = '↻ إعادة المحاولة';
+      again.onclick = () => retryLast();
+      acts.appendChild(again);
+      box.appendChild(acts);
+      b.append(think.block, ans, box);
+    } else {
+      ans.innerHTML = md(m.text);
+      b.append(think.block, ans);
+    }
+    wrap.append(av, b);
   }
   return wrap;
 }
@@ -736,6 +1033,37 @@ async function readyProvider() {
   return true;
 }
 
+/* خطأ مختصر للعرض داخل الفقاعة */
+function shortErr(err) {
+  let s = String((err && err.message) || err || 'خطأ غير معروف');
+  s = s.replace(/^(Error|GoogleGenerativeAI Error|APIError)[:\s]+/i, '').replace(/\s+/g, ' ').trim();
+  if (s.length > 90) s = s.slice(0, 88) + '…';
+  return s;
+}
+/* بديل مقترح: موديل آخر من نفس المقدم، وإلا مقدم آخر جاهز */
+function nextFallback() {
+  const provReady = k => (prefs.keys[k] || '') && (prefs.models[k] || []).length > 0 && (k !== 'custom' || prefs.customBase);
+  const list = pModels();
+  const other = list.find(m => m !== pModel());
+  if (other) return { provider: prefs.provider, model: other };
+  for (const k of ['google', 'openrouter', 'dahl', 'custom']) {
+    if (k === prefs.provider || !provReady(k)) continue;
+    return { provider: k, model: prefs.model[k] || prefs.models[k][0] };
+  }
+  return null;
+}
+/* التبديل للبديل وإعادة إرسال آخر رسالة مستخدم فورًا */
+function fallbackRetry(fb) {
+  const chat = getChat(state.cur);
+  if (!chat || state.streaming) return;
+  if (chat.msgs.length && chat.msgs[chat.msgs.length - 1].fail) chat.msgs.pop();
+  prefs.provider = fb.provider;
+  prefs.model[fb.provider] = fb.model;
+  savePrefs(); applyPrefs();
+  toast('المحاولة بموديل آخر: ' + fb.model, '');
+  sendToAI(null);
+}
+
 async function sendToAI(userText) {
   if (!(await readyProvider())) return;
   const cfg = pCfg();
@@ -752,7 +1080,12 @@ async function sendToAI(userText) {
   setConn('busy', 'جارٍ الاتصال…');
   el.chatEmpty.hidden = true;
 
-  // فقاعة بث مباشر
+  // المصادر: المحددة يدويًا، وإلا التعرف على اسم الكتاب في نص الرسالة
+  const lastUser = [...chat.msgs].reverse().find(m => m.role === 'user');
+  const srcs = pickSources(userText || (lastUser && lastUser.text) || '');
+  const srcParts = srcs.length ? await buildSourceParts(srcs, isGemini) : [];
+
+  // فقاعة بث مباشر (تفكير + إجابة)
   const wrap = document.createElement('div');
   wrap.className = 'msg ai';
   const av = document.createElement('div');
@@ -760,34 +1093,63 @@ async function sendToAI(userText) {
   av.innerHTML = SPARK_SVG;
   const bub = document.createElement('div');
   bub.className = 'bubble md';
-  bub.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+  const think = buildThinkBlock();
+  const ans = document.createElement('div');
+  ans.className = 'ans';
+  ans.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+  bub.append(think.block, ans);
   wrap.append(av, bub);
   el.messages.appendChild(wrap);
   requestAnimationFrame(() => scrollBottom(true));
 
-  let buf = '';
+  let buf = '', tbuf = '';
   let usageTokens = 0;
   let pendingRender = false;
   const flushTimer = setInterval(() => {
     if (!pendingRender) return;
     pendingRender = false;
-    bub.innerHTML = md(buf);
+    setThinkUI(think, tbuf, true);
+    if (buf) ans.innerHTML = md(buf);
+    else if (!tbuf) ans.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
     scrollBottom();
   }, STREAM_FLUSH_MS);
 
   state.abort = new AbortController();
   try {
-    let url, headers, body;
+    let url, headers, bodyObj;
     if (isGemini) {
+      const contents = buildContents(chat);
+      if (srcParts.length) {
+        const last = contents[contents.length - 1];
+        last.parts = [...srcParts, { text: (lastUser && lastUser.text) || '' }];
+      }
+      bodyObj = {
+        contents,
+        generationConfig: { temperature: 0.7, thinkingConfig: { includeThoughts: true } }
+      };
+      if (srcParts.length) bodyObj.systemInstruction = { parts: [{ text: SRC_INSTRUCTION }] };
       url = pBase() + '/models/' + encodeURIComponent(pModel()) + ':streamGenerateContent?alt=sse&key=' + encodeURIComponent(pKey());
       headers = { 'Content-Type': 'application/json' };
-      body = JSON.stringify({ contents: buildContents(chat), generationConfig: { temperature: 0.7 } });
     } else {
+      const messages = buildMessages(chat);
+      if (srcParts.length) {
+        messages.unshift({ role: 'system', content: SRC_INSTRUCTION });
+        const last = messages[messages.length - 1];
+        last.content = [...srcParts, { type: 'text', text: last.content }];
+      }
+      bodyObj = { model: pModel(), messages, stream: true, temperature: 0.7 };
       url = pBase() + '/chat/completions';
       headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + pKey() };
-      body = JSON.stringify({ model: pModel(), messages: buildMessages(chat), stream: true, temperature: 0.7 });
     }
-    const res = await fetch(url, { method: 'POST', headers, body, signal: state.abort.signal });
+    let res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(bodyObj), signal: state.abort.signal });
+    // نماذج قديمة قد ترفض thinkingConfig — إعادة واحدة بدونه
+    if (!res.ok && isGemini && bodyObj.generationConfig.thinkingConfig) {
+      let em = ''; try { em = await res.text(); } catch (e) {}
+      if (/thinking/i.test(em || '')) {
+        delete bodyObj.generationConfig.thinkingConfig;
+        res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(bodyObj), signal: state.abort.signal });
+      }
+    }
     if (!res.ok) {
       let em = 'فشل الطلب (' + res.status + ')';
       try { const j = await res.json(); em = j?.error?.message || em; } catch (e) {}
@@ -811,11 +1173,16 @@ async function sendToAI(userText) {
           const j = JSON.parse(payload);
           if (isGemini) {
             const parts = j?.candidates?.[0]?.content?.parts || [];
-            for (const p of parts) if (p.text) buf += p.text;
+            for (const p of parts) {
+              if (!p.text) continue;
+              if (p.thought) tbuf += p.text; else buf += p.text;
+            }
             if (j?.usageMetadata?.totalTokenCount) usageTokens = j.usageMetadata.totalTokenCount;
           } else {
-            const d = j?.choices?.[0]?.delta?.content;
-            if (typeof d === 'string') buf += d;
+            const d = j?.choices?.[0]?.delta || {};
+            const r = d.reasoning ?? d.reasoning_content;
+            if (typeof r === 'string' && r) tbuf += r;
+            if (typeof d.content === 'string') buf += d.content;
             if (j?.usage?.total_tokens) usageTokens = j.usage.total_tokens;
           }
           pendingRender = true;
@@ -823,9 +1190,13 @@ async function sendToAI(userText) {
       }
     }
     clearInterval(flushTimer);
-    if (!buf.trim()) throw new Error('رد فارغ من الخدمة');
-    bub.innerHTML = md(buf);
-    chat.msgs.push({ role: 'model', text: buf });
+    if (!buf.trim() && !tbuf.trim()) throw new Error('رد فارغ من الخدمة');
+    setThinkUI(think, tbuf, false);
+    think.body.textContent = tbuf;
+    ans.innerHTML = buf ? md(buf) : '<em>(لم يُرجع الموديل نصًا)</em>';
+    const msgObj = { role: 'model', text: buf || '' };
+    if (tbuf.trim()) msgObj.think = tbuf;
+    chat.msgs.push(msgObj);
     chat.updated = Date.now();
     saveChats();
     setConn('ok', 'متصل');
@@ -834,17 +1205,19 @@ async function sendToAI(userText) {
     clearInterval(flushTimer);
     const aborted = err && err.name === 'AbortError';
     if (aborted) {
-      if (buf.trim()) { chat.msgs.push({ role: 'model', text: buf + '\n\n*(أُوقفت)*' }); chat.updated = Date.now(); saveChats(); }
-      bub.innerHTML = md(buf || '*(أُوقفت الإجابة)*');
+      if (buf.trim()) { chat.msgs.push({ role: 'model', text: buf + '\n\n*(أُوقفت)*', ...(tbuf.trim() ? { think: tbuf } : {}) }); chat.updated = Date.now(); saveChats(); }
+      setThinkUI(think, tbuf, false);
+      bub.querySelector('.ans').innerHTML = md(buf || '*(أُوقفت الإجابة)*');
       toast('أُوقفت الإجابة', '');
       setConn('ok', 'متصل');
     } else {
       bub.remove();
       wrap.remove();
-      chat.msgs.push({ role: 'model', text: (err && err.message) || 'خطأ غير معروف', fail: true });
+      // خطأ مختصر داخل الفقاعة + عرض بديل تلقائي
+      chat.msgs.push({ role: 'model', text: shortErr(err), fail: true });
       saveChats();
       renderChat();
-      toast('فشل الاتصال: ' + ((err && err.message) || 'خطأ شبكة'), 'err');
+      toast('تعذّر الرد — جرّب موديلًا آخر أو أعد المحاولة', 'err');
       setConn('err', 'خطأ — إعادة المحاولة لاحقًا');
       scheduleConnRetry();
     }
@@ -986,6 +1359,17 @@ function bindEvents() {
       v => { prefs.model[prefs.provider] = v; savePrefs(); applyPrefs(); toast('النموذج: ' + v, 'ok'); });
   };
 
+  // المصادر: اللوحة + رفع الملفات
+  el.btnSources.onclick = () => {
+    if (!el.optList.hidden && el.optList.textContent.includes('المصادر')) { closeOptList(); return; }
+    openSourcesPanel();
+  };
+  el.fileSources.addEventListener('change', async () => {
+    const files = [...el.fileSources.files];
+    el.fileSources.value = '';
+    if (files.length) await addSourceFiles(files);
+  });
+
   // مفتاح API
   el.btnSaveKey.onclick = () => {
     const v = el.inputKey.value.trim();
@@ -1113,6 +1497,7 @@ function init() {
   else if (state.chats.length) state.cur = [...state.chats].sort((a, b) => (b.updated || b.ts) - (a.updated || a.ts))[0].id;
   switchTab(ui.tab === 'chats' ? 'chats' : 'chat');
   renderChat();
+  loadSources().then(applySrcBtn).catch(() => {});
   bgfx.start();
   registerSW();
   initialConnCheck();

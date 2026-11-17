@@ -298,7 +298,7 @@ main{flex:1;display:flex;flex-direction:column;min-height:0;position:relative;z-
 
 /* صفوف مدير النماذج */
 .opt .mname{direction:ltr;text-align:left;font-family:ui-monospace,Consolas,monospace;font-size:13px;word-break:break-all}
-.opt .del{
+.opt .del,.src-row .del{
   width:36px;height:36px;flex:none;border-radius:10px;border:1px solid var(--line);
   background:transparent;color:var(--danger);cursor:pointer;font-size:16px;font-weight:800;
   display:inline-flex;align-items:center;justify-content:center;
@@ -306,6 +306,71 @@ main{flex:1;display:flex;flex-direction:column;min-height:0;position:relative;z-
 }
 .opt .del:hover{background:rgba(255,107,122,.12)}
 .opt.add-opt{color:var(--accent);font-weight:800;border:1px dashed rgba(79,141,255,.45)}
+
+/* ===== كتلة التفكير المطوية ===== */
+.think{margin:0 0 6px;border:1px solid var(--line);border-radius:12px;background:rgba(79,141,255,.07);overflow:hidden}
+.think-head{
+  width:100%;min-height:44px;display:flex;align-items:center;gap:8px;
+  padding:6px 12px;border:0;background:transparent;color:var(--muted);
+  font-family:inherit;font-size:13px;font-weight:700;cursor:pointer;text-align:start;
+}
+.think-head svg.think-ico{flex:none;color:var(--accent)}
+.think-head .t-line{
+  flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.think-head .t-chev{flex:none;transition:transform .25s var(--ease);opacity:.7}
+.think.open .t-chev{transform:rotate(180deg)}
+.think-head .t-dots i{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--accent);margin-inline-start:2px;animation:blink 1.2s infinite}
+.think-head .t-dots i:nth-child(2){animation-delay:.2s}
+.think-head .t-dots i:nth-child(3){animation-delay:.4s}
+.t-body{
+  padding:2px 14px 12px;color:var(--muted);font-size:13.5px;line-height:1.7;
+  white-space:pre-wrap;word-break:break-word;max-height:260px;overflow-y:auto;
+  border-top:1px dashed var(--line);padding-top:10px;margin-top:2px;
+}
+
+/* ===== صندوق الخطأ الذكي ===== */
+.fail-box{display:flex;flex-direction:column;gap:8px;margin-top:4px}
+.fail-err{
+  display:flex;align-items:flex-start;gap:7px;color:var(--danger);font-size:13.5px;font-weight:700;
+  padding:8px 12px;border:1px solid rgba(255,107,122,.4);border-radius:12px;
+  background:rgba(255,107,122,.08);
+}
+.fail-err svg{flex:none;margin-top:2px}
+.fail-err .fmsg{word-break:break-word}
+.fail-actions{display:flex;flex-wrap:wrap;gap:8px}
+.fail-actions .chip{height:44px}
+
+/* ===== المصادر ===== */
+.src-btn{border-radius:999px;position:relative;overflow:visible}
+.src-btn.on{color:var(--accent);border-color:rgba(79,141,255,.6);background:rgba(79,141,255,.12)}
+.src-badge{
+  position:absolute;top:-4px;inset-inline-start:-4px;min-width:18px;height:18px;padding:0 5px;
+  border-radius:99px;background:var(--grad);color:#fff;font-size:10.5px;font-weight:800;
+  display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(47,107,255,.5);
+}
+.src-row{
+  display:flex;align-items:center;gap:10px;width:100%;min-height:52px;
+  padding:8px 14px;margin:4px 0;border:1px solid transparent;border-radius:var(--r-sm);
+  background:transparent;transition:background-color .2s var(--ease);
+}
+.src-row:hover{background:var(--glass-bg)}
+.src-check{
+  width:26px;height:26px;flex:none;border-radius:9px;border:2px solid var(--line);
+  background:transparent;color:#fff;cursor:pointer;padding:0;
+  display:inline-flex;align-items:center;justify-content:center;
+  transition:background-color .2s var(--ease),border-color .2s var(--ease);
+}
+.src-check svg{opacity:0;transition:opacity .15s}
+.src-check.on{background:var(--grad);border-color:transparent}
+.src-check.on svg{opacity:1}
+.src-name{
+  flex:1;min-width:0;direction:ltr;text-align:left;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:13.5px;font-weight:700;
+}
+.src-size{color:var(--muted);font-size:11.5px;flex:none;font-variant-numeric:tabular-nums}
+.src-hint{color:var(--muted);font-size:12.5px;padding:6px 14px 4px;line-height:1.6}
 /* ==STYLES-APPEND== */
 
 /* ===== ورقة الإعدادات ===== */
