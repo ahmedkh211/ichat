@@ -5,20 +5,39 @@
 'use strict';
 
 /* ===== ثوابت ===== */
-const APP_VERSION = 'v1.0.5';            // تزامن مع VERSION في sw.js
+const APP_VERSION = 'v1.1.0';            // تزامن مع VERSION في sw.js
 const LS_PREFS = 'ichat:prefs';
 const LS_CHATS = 'ichat:chats';
 const LS_UI    = 'ichat:ui';
-const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-const MODELS = [
-  { id:'gemini-2.5-flash', name:'Gemini 2.5 Flash' },
-  { id:'gemini-2.5-pro',   name:'Gemini 2.5 Pro' },
-  { id:'gemini-2.0-flash', name:'Gemini 2.0 Flash' },
-  { id:'gemini-1.5-flash', name:'Gemini 1.5 Flash' }
-];
 const CHATS_CAP = 50;
 const BLOB_CAP = 120;
 const STREAM_FLUSH_MS = 420;   // تجميع تحديثات البث قبل رسمها
+
+/* المقدمون: نوع gemini أو openai (متوافق) */
+const PROVIDERS = {
+  google:     { name:'Google AI Studio', type:'gemini', base:'https://generativelanguage.googleapis.com/v1beta' },
+  openrouter: { name:'OpenRouter',        type:'openai', base:'https://openrouter.ai/api/v1' },
+  dahl:       { name:'Dahl AI',           type:'openai', base:'https://inference.dahl.global/v1' },
+  custom:     { name:'مقدم خاص',          type:'openai', base:'' }
+};
+/* نماذج مسبقة (أحدث المتاح وقت الإصدار — والمستخدم يضيف/يحذف بحرية) */
+const MODEL_PRESETS = {
+  google: [
+    'gemini-4-hydrogen', 'gemini-4-argon', 'gemini-4-carbon',
+    'gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview'
+  ],
+  openrouter: [
+    'inclusionai/ling-3.2-flash:free', 'baidu/ernie-5.5-flash-preview:free',
+    'thinkingmachines/inkling-2-small:free', 'nvidia/nemotron-3.5-super-vl:free',
+    'nvidia/nemotron-3-ultra-550b-a55b:free', 'google/gemma-4-31b-it:free',
+    'google/gemma-4-26b-a4b-it:free', 'cohere/north-mini-code:free',
+    'particle-ai/particle-1:free', 'dots-studio/dots-3-note-preview:free',
+    'liquid/lfm-3-1.7b:free', 'recursive/flint-v1.0:free',
+    'nvidia/nemotron-3.5-lightning:free', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'
+  ],
+  dahl: [ 'MiniMaxAI/MiniMax-M2.7', 'deepseek-ai/DeepSeek-V4-Flash-0731', 'zai-org/GLM-5.3-Flash' ],
+  custom: []
+};
 
 /* ===== أدوات عامة ===== */
 const $  = (s, r) => (r || document).querySelector(s);
@@ -66,10 +85,19 @@ function revokeAllBlobs() {
 /* ===== حالة مركزية ===== */
 const DEFAULT_PREFS = {
   theme: 'dark', glass: 'soft', bg: 'on',
-  model: 'gemini-2.5-flash', key: '',
+  provider: 'google',
+  keys: { google: '', openrouter: '', dahl: '', custom: '' },
+  customBase: '',
+  models: JSON.parse(JSON.stringify(MODEL_PRESETS)),
+  model: {
+    google: MODEL_PRESETS.google[0],
+    openrouter: MODEL_PRESETS.openrouter[0],
+    dahl: MODEL_PRESETS.dahl[0],
+    custom: ''
+  },
   usage: { d: '', req: 0, tok: 0 }
 };
-let prefs = { ...DEFAULT_PREFS, usage: { ...DEFAULT_PREFS.usage } };
+let prefs = JSON.parse(JSON.stringify(DEFAULT_PREFS));
 const state = {
   tab: 'chat',        // chat | chats
   chats: [],          // [{id,title,ts,updated,msgs:[{role,text}]}]
@@ -82,11 +110,29 @@ const state = {
 };
 
 /* ===== طبقة التخزين (localStorage) ===== */
+function migrate(raw) {
+  // ترحيل النسخة القديمة: مفتاح/نموذج واحد عام → لكل مقدم
+  if (raw && typeof raw.key === 'string' && raw.key) {
+    raw.keys = { ...(raw.keys || {}), google: raw.keys?.google || raw.key };
+    delete raw.key;
+  }
+  if (raw && typeof raw.model === 'string') {
+    const m = raw.model;
+    raw.model = String(m).startsWith('gemini') ? { google: m } : {};
+  }
+  return raw;
+}
 function loadPrefs() {
   try {
-    const raw = JSON.parse(localStorage.getItem(LS_PREFS) || '{}');
-    prefs = { ...DEFAULT_PREFS, ...raw, usage: { ...DEFAULT_PREFS.usage, ...(raw.usage || {}) } };
-  } catch (e) { prefs = { ...DEFAULT_PREFS, usage: { ...DEFAULT_PREFS.usage } }; }
+    const raw = migrate(JSON.parse(localStorage.getItem(LS_PREFS) || '{}'));
+    prefs = {
+      ...JSON.parse(JSON.stringify(DEFAULT_PREFS)), ...raw,
+      keys: { ...DEFAULT_PREFS.keys, ...(raw.keys || {}) },
+      models: { ...JSON.parse(JSON.stringify(DEFAULT_PREFS.models)), ...(raw.models || {}) },
+      model: { ...DEFAULT_PREFS.model, ...(raw.model || {}) },
+      usage: { ...DEFAULT_PREFS.usage, ...(raw.usage || {}) }
+    };
+  } catch (e) { prefs = JSON.parse(JSON.stringify(DEFAULT_PREFS)); }
 }
 function savePrefs() {
   try { localStorage.setItem(LS_PREFS, JSON.stringify(prefs)); } catch (e) {}
@@ -121,13 +167,31 @@ function cacheDOM() {
   el.chatsEmpty = $('#chatsEmpty'); el.chatList = $('#chatList');
   el.sheet = $('#sheetSettings'); el.sheetBackdrop = $('#sheetBackdrop');
   el.optList = $('#optList');
+  el.valProvider = $('#valProvider'); el.valCustomBase = $('#valCustomBase');
   el.valTheme = $('#valTheme'); el.valGlass = $('#valGlass'); el.valBg = $('#valBg');
   el.valModel = $('#valModel'); el.valKey = $('#valKey'); el.valUsage = $('#valUsage');
   el.valVersion = $('#valVersion');
+  el.modelChip = $('#modelChip'); el.modelChipName = $('#modelChipName');
+  el.rowProvider = $('#rowProvider'); el.rowCustomBase = $('#rowCustomBase');
   el.modalKey = $('#modalKey'); el.inputKey = $('#inputKey'); el.btnSaveKey = $('#btnSaveKey');
+  el.keyTitle = $('#keyTitle'); el.keyHint = $('#keyHint');
+  el.modalInput = $('#modalInput'); el.inputTitle = $('#inputTitle');
+  el.inputHint = $('#inputHint'); el.inputField = $('#inputField'); el.btnSaveInput = $('#btnSaveInput');
   el.modalConfirm = $('#modalConfirm'); el.confirmTitle = $('#confirmTitle');
   el.confirmMsg = $('#confirmMsg'); el.btnConfirmYes = $('#btnConfirmYes'); el.btnConfirmNo = $('#btnConfirmNo');
   el.toasts = $('#toasts');
+}
+
+/* ===== مساعدو المقدم الحالي ===== */
+function pCfg() { return PROVIDERS[prefs.provider] || PROVIDERS.google; }
+function pKey() { return (prefs.keys || {})[prefs.provider] || ''; }
+function pModels() { return (prefs.models || {})[prefs.provider] || []; }
+function pModel() { return (prefs.model || {})[prefs.provider] || ''; }
+function pBase() {
+  const c = pCfg();
+  if (c.type === 'gemini') return c.base;
+  if (prefs.provider === 'custom') return (prefs.customBase || '').replace(/\/+$/, '');
+  return c.base;
 }
 
 /* توست قصير بعد كل فعل مهم */
@@ -193,9 +257,105 @@ function openOptList(title, options, current, onPick) {
     b.onclick = () => { closeOptList(); onPick(op.v); };
     el.optList.appendChild(b);
   });
-  el.optList.hidden = false;
+  openOptPanel();
 }
-function closeOptList() { el.optList.hidden = true; }
+/* قائمة الخيارات تُغلق بالنقر خارجها */
+function optOutside(ev) {
+  if (!el.optList.contains(ev.target) && !ev.target.closest?.('.modal-backdrop')) closeOptList();
+}
+function openOptPanel() {
+  el.optList.hidden = false;
+  setTimeout(() => document.addEventListener('click', optOutside, { capture: true }), 0);
+}
+function closeOptList() {
+  el.optList.hidden = true;
+  document.removeEventListener('click', optOutside, { capture: true });
+}
+
+/* مودال إدخال عام (يُعيد الوعد بالقيمة أو null) */
+function inputBox(title, hint, placeholder, initial) {
+  return new Promise(resolve => {
+    el.inputTitle.textContent = title;
+    el.inputHint.textContent = hint || '';
+    el.inputField.placeholder = placeholder || '';
+    el.inputField.value = initial || '';
+    openModal(el.modalInput);
+    setTimeout(() => el.inputField.focus(), 250);
+    const done = val => {
+      el.btnSaveInput.onclick = null;
+      closeModal(el.modalInput);
+      resolve(val);
+    };
+    el.btnSaveInput.onclick = () => {
+      const v = el.inputField.value.trim();
+      if (!v) { toast('أدخل قيمة صحيحة', 'err'); return; }
+      done(v);
+    };
+  });
+}
+
+/* مدير النماذج: اختيار + حذف + إضافة (علامة +) */
+async function openModelManager() {
+  const list = pModels();
+  el.optList.textContent = '';
+  const h = document.createElement('div');
+  h.style.cssText = 'font-weight:800;font-size:15px;padding:6px 14px 10px;direction:ltr;text-align:right';
+  h.textContent = 'النماذج — ' + pCfg().name;
+  el.optList.appendChild(h);
+  if (!list.length) {
+    const e = document.createElement('div');
+    e.style.cssText = 'color:var(--muted);font-size:13.5px;padding:4px 14px 10px';
+    e.textContent = 'القائمة فارغة — أضف أسماء النماذج المدعومة من مقدمك.';
+    el.optList.appendChild(e);
+  }
+  list.forEach(m => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'opt' + (m === pModel() ? ' sel' : '');
+    const nm = document.createElement('span');
+    nm.className = 'mname';
+    nm.textContent = m;
+    const tk = document.createElement('span');
+    tk.className = 'tick';
+    tk.textContent = '✓';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'del';
+    del.textContent = '×';
+    del.setAttribute('aria-label', 'حذف النموذج');
+    del.onclick = async ev => {
+      ev.stopPropagation();
+      const ok = await confirmBox('حذف نموذج', 'إزالة «' + m + '» من قائمة النماذج؟');
+      if (!ok) return;
+      prefs.models[prefs.provider] = list.filter(x => x !== m);
+      if (pModel() === m) prefs.model[prefs.provider] = prefs.models[prefs.provider][0] || '';
+      savePrefs(); applyPrefs(); openModelManager();
+      toast('أُزيل النموذج', 'ok');
+    };
+    b.append(nm, tk, del);
+    b.onclick = () => {
+      prefs.model[prefs.provider] = m;
+      savePrefs(); applyPrefs(); closeOptList();
+      toast('النموذج: ' + m, 'ok');
+    };
+    el.optList.appendChild(b);
+  });
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'opt add-opt';
+  add.textContent = '＋ إضافة نموذج';
+  add.onclick = async () => {
+    const v = await inputBox('إضافة نموذج', 'اسم النموذج كما يتيحه مقدمك', 'مثال: gemini-4-hydrogen');
+    if (!v) return;
+    if (pModels().includes(v)) { toast('النموذج موجود بالفعل', ''); openModelManager(); return; }
+    prefs.models[prefs.provider] = [...pModels(), v];
+    prefs.model[prefs.provider] = v;
+    savePrefs(); applyPrefs(); openModelManager();
+    toast('أُضيف النموذج: ' + v, 'ok');
+  };
+  el.optList.appendChild(add);
+  openOptPanel();
+}
 
 /* تطبيق prefs على الواجهة */
 const THEME_L = { dark:'داكن', light:'فاتح' };
@@ -210,9 +370,12 @@ function applyPrefs() {
   el.valTheme.textContent = THEME_L[prefs.theme] || prefs.theme;
   el.valGlass.textContent = GLASS_L[prefs.glass] || prefs.glass;
   el.valBg.textContent = prefs.bg === 'off' ? 'بلا' : 'متحركة';
-  const m = MODELS.find(x => x.id === prefs.model);
-  el.valModel.textContent = m ? m.id : prefs.model;
-  el.valKey.textContent = prefs.key ? 'محفوظ ✓' : 'غير محفوظ';
+  el.valProvider.textContent = pCfg().name;
+  el.valKey.textContent = pKey() ? 'محفوظ ✓' : 'غير محفوظ';
+  el.rowCustomBase.hidden = prefs.provider !== 'custom';
+  el.valCustomBase.textContent = prefs.customBase ? 'مضبوط ✓' : 'غير مضبوط';
+  el.valModel.textContent = pModel() ? pModel() : '— أضف نموذجًا';
+  el.modelChipName.textContent = pModel() || 'النموذج';
   el.valVersion.textContent = APP_VERSION;
   renderUsage();
   bgfx && bgfx.refresh();
@@ -546,18 +709,37 @@ const bgfx = {
   stop() { if (this.raf) { cancelAnimationFrame(this.raf); this.raf = 0; } }
 };
 
-/* ===== طبقة API — Gemini مع بث SSE ===== */
-function apiHeaders() { return { 'Content-Type': 'application/json' }; }
+/* ===== طبقة API — بث SSE (Gemini أو متوافق OpenAI) ===== */
 function buildContents(chat) {
   return chat.msgs.filter(m => !m.fail).map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.text }] }));
 }
+function buildMessages(chat) {
+  return chat.msgs.filter(m => !m.fail).map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text }));
+}
+/* جاهزية المقدم الحالي: رابط + مفتاح */
+async function readyProvider() {
+  if (prefs.provider === 'custom' && !prefs.customBase) {
+    toast('أدخل رابط المقدم الخاص أولًا', 'err');
+    editCustomBase();
+    return false;
+  }
+  if (!pModel()) {
+    toast('أضف نموذجًا واحدًا على الأقل', 'err');
+    openModelManager();
+    return false;
+  }
+  if (!pKey()) {
+    toast('أدخل مفتاح ' + pCfg().name + ' أولًا', 'err');
+    openKeyModal();
+    return false;
+  }
+  return true;
+}
 
 async function sendToAI(userText) {
-  if (!prefs.key) {
-    toast('أدخل مفتاح API من الإعدادات أولًا', 'err');
-    openModal(el.modalKey);
-    return;
-  }
+  if (!(await readyProvider())) return;
+  const cfg = pCfg();
+  const isGemini = cfg.type === 'gemini';
   const chat = ensureChat();
   if (userText) {
     chat.msgs.push({ role: 'user', text: userText });
@@ -595,13 +777,17 @@ async function sendToAI(userText) {
 
   state.abort = new AbortController();
   try {
-    const url = API_BASE + '/models/' + encodeURIComponent(prefs.model) + ':streamGenerateContent?alt=sse&key=' + encodeURIComponent(prefs.key);
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({ contents: buildContents(chat), generationConfig: { temperature: 0.7 } }),
-      signal: state.abort.signal
-    });
+    let url, headers, body;
+    if (isGemini) {
+      url = pBase() + '/models/' + encodeURIComponent(pModel()) + ':streamGenerateContent?alt=sse&key=' + encodeURIComponent(pKey());
+      headers = { 'Content-Type': 'application/json' };
+      body = JSON.stringify({ contents: buildContents(chat), generationConfig: { temperature: 0.7 } });
+    } else {
+      url = pBase() + '/chat/completions';
+      headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + pKey() };
+      body = JSON.stringify({ model: pModel(), messages: buildMessages(chat), stream: true, temperature: 0.7 });
+    }
+    const res = await fetch(url, { method: 'POST', headers, body, signal: state.abort.signal });
     if (!res.ok) {
       let em = 'فشل الطلب (' + res.status + ')';
       try { const j = await res.json(); em = j?.error?.message || em; } catch (e) {}
@@ -623,9 +809,15 @@ async function sendToAI(userText) {
         if (!payload || payload === '[DONE]') continue;
         try {
           const j = JSON.parse(payload);
-          const parts = j?.candidates?.[0]?.content?.parts || [];
-          for (const p of parts) if (p.text) buf += p.text;
-          if (j?.usageMetadata?.totalTokenCount) usageTokens = j.usageMetadata.totalTokenCount;
+          if (isGemini) {
+            const parts = j?.candidates?.[0]?.content?.parts || [];
+            for (const p of parts) if (p.text) buf += p.text;
+            if (j?.usageMetadata?.totalTokenCount) usageTokens = j.usageMetadata.totalTokenCount;
+          } else {
+            const d = j?.choices?.[0]?.delta?.content;
+            if (typeof d === 'string') buf += d;
+            if (j?.usage?.total_tokens) usageTokens = j.usage.total_tokens;
+          }
           pendingRender = true;
         } catch (e) {}
       }
@@ -686,12 +878,20 @@ function retryLast() {
 }
 
 /* فحص الاتصال تلقائيًا بتزايد زمني — أخطاء المفتاح 4xx لا تُعاد */
+async function probeConn() {
+  const cfg = pCfg();
+  if (cfg.type === 'gemini') {
+    return fetch(pBase() + '/models?key=' + encodeURIComponent(pKey()), { method: 'GET' });
+  }
+  return fetch(pBase() + '/models', { method: 'GET', headers: { 'Authorization': 'Bearer ' + pKey() } });
+}
 function scheduleConnRetry() {
   setTimeout(async () => {
-    if (state.conn !== 'err' || !prefs.key) return;
+    if (state.conn !== 'err' || !pKey()) return;
+    if (prefs.provider === 'custom' && !prefs.customBase) return;
     setConn('busy', 'جارٍ إعادة الاتصال…');
     try {
-      const r = await fetch(API_BASE + '/models?key=' + encodeURIComponent(prefs.key), { method: 'GET' });
+      const r = await probeConn();
       if (r.ok) { setConn('ok', 'متصل'); state.retryDelay = 2000; }
       else if (r.status >= 400 && r.status < 500) setConn('err', 'المفتاح غير صالح');
       else throw new Error('bad');
@@ -703,14 +903,40 @@ function scheduleConnRetry() {
   }, state.retryDelay);
 }
 async function initialConnCheck() {
-  if (!prefs.key) { setConn('idle', 'أدخل مفتاح API من الإعدادات'); return; }
+  if (!pKey()) {
+    setConn(prefs.provider === 'custom' && !prefs.customBase ? 'err' : 'idle',
+      prefs.provider === 'custom' && !prefs.customBase ? 'أضف رابط المقدم الخاص' : 'أدخل مفتاح API من الإعدادات');
+    return;
+  }
+  if (prefs.provider === 'custom' && !prefs.customBase) { setConn('err', 'أضف رابط المقدم الخاص'); return; }
   setConn('busy', 'جارٍ الاتصال…');
   try {
-    const r = await fetch(API_BASE + '/models?key=' + encodeURIComponent(prefs.key), { method: 'GET' });
+    const r = await probeConn();
     if (r.ok) setConn('ok', 'متصل');
     else if (r.status >= 400 && r.status < 500) setConn('err', 'المفتاح غير صالح');
     else { setConn('err', 'خطأ في الخدمة'); state.retryDelay = 2000; scheduleConnRetry(); }
   } catch (e) { setConn('err', 'لا يوجد اتصال'); state.retryDelay = 2000; scheduleConnRetry(); }
+}
+
+/* مودال المفتاح حسب المقدم */
+function openKeyModal() {
+  el.keyTitle.textContent = 'مفتاح ' + pCfg().name;
+  el.keyHint.textContent = prefs.provider === 'custom'
+    ? 'الصق مفتاح مقدمك الخاص — يُحفظ على جهازك فقط.'
+    : 'الصق مفتاحك — يُحفظ على جهازك فقط.';
+  el.inputKey.value = pKey();
+  openModal(el.modalKey);
+  setTimeout(() => el.inputKey.focus(), 250);
+}
+/* رابط المقدم الخاص */
+async function editCustomBase() {
+  const v = await inputBox('رابط المقدم الخاص', 'Base URL متوافق OpenAI (ينتهي غالبًا بـ /v1)', 'https://example.com/v1', prefs.customBase);
+  if (!v) return;
+  prefs.customBase = v.replace(/\/+$/, '');
+  savePrefs(); applyPrefs();
+  toast('ضُبط رابط المقدم', 'ok');
+  if (!pKey()) openKeyModal();
+  else initialConnCheck();
 }
 /* ===== ربط الأحداث ===== */
 function bindEvents() {
@@ -731,43 +957,63 @@ function bindEvents() {
     { v:'clear', n:'شفاف' }, { v:'soft', n:'ناعم' }, { v:'solid', n:'مصنّر' }, { v:'off', n:'بلا (كلاسيكي)' }
   ], prefs.glass, v => { prefs.glass = v; savePrefs(); applyPrefs(); toast('تم تغيير درجة الزجاج', 'ok'); });
   $('#rowBg').onclick = () => openOptList('الخلفية', [{ v:'on', n:'متحركة' }, { v:'off', n:'بلا' }], prefs.bg, v => { prefs.bg = v; savePrefs(); applyPrefs(); });
-  $('#rowModel').onclick = () => openOptList('النموذج', MODELS.map(m => ({ v:m.id, n:m.name })), prefs.model, v => { prefs.model = v; savePrefs(); applyPrefs(); toast('النموذج: ' + v, 'ok'); });
-  $('#rowKey').onclick = () => { el.inputKey.value = prefs.key; openModal(el.modalKey); setTimeout(() => el.inputKey.focus(), 250); };
+  $('#rowProvider').onclick = () => openOptList('المقدم',
+    Object.entries(PROVIDERS).map(([k, p]) => ({ v: k, n: p.name })),
+    prefs.provider,
+    v => {
+      prefs.provider = v;
+      if (!pModel() && pModels().length) prefs.model[v] = pModels()[0];
+      savePrefs(); applyPrefs();
+      toast('المقدم: ' + pCfg().name, 'ok');
+      initialConnCheck();
+      if (v === 'custom' && !prefs.customBase) editCustomBase();
+      else if (!pKey()) openKeyModal();
+    });
+  $('#rowKey').onclick = openKeyModal;
+  $('#rowCustomBase').onclick = editCustomBase;
+  $('#rowModel').onclick = openModelManager;
   $('#rowUsage').onclick = async () => {
     const ok = await confirmBox('تصفير الاستخدام', 'سيتم تصفير عدّاد اليوم. هل تريد المتابعة؟');
     if (ok) { prefs.usage = { d: today(), req: 0, tok: 0 }; savePrefs(); renderUsage(); toast('صُفّر العدّاد', 'ok'); }
+  };
+
+  // شريحة النموذج في شريط الدردشة (متزامنة مع الإعدادات)
+  el.modelChip.onclick = () => {
+    const list = pModels();
+    if (!list.length) { openModelManager(); return; }
+    openOptList('النموذج — ' + pCfg().name,
+      list.map(m => ({ v: m, n: m })), pModel(),
+      v => { prefs.model[prefs.provider] = v; savePrefs(); applyPrefs(); toast('النموذج: ' + v, 'ok'); });
   };
 
   // مفتاح API
   el.btnSaveKey.onclick = () => {
     const v = el.inputKey.value.trim();
     if (!v) { toast('أدخل المفتاح أولًا', 'err'); return; }
-    prefs.key = v;
+    prefs.keys[prefs.provider] = v;
     savePrefs(); applyPrefs(); closeModal(el.modalKey);
-    toast('حُفظ المفتاح على جهازك', 'ok');
+    toast('حُفظ مفتاح ' + pCfg().name + ' على جهازك', 'ok');
     initialConnCheck();
   };
   $$('#modalKey [data-close]').forEach(b => b.addEventListener('click', () => closeModal(el.modalKey)));
+  $$('#modalInput [data-close]').forEach(b => b.addEventListener('click', () => closeModal(el.modalInput)));
   $$('#modalConfirm [data-close]').forEach(b => b.addEventListener('click', () => closeModal(el.modalConfirm)));
   el.modalKey.addEventListener('click', ev => { if (ev.target === el.modalKey) closeModal(el.modalKey); });
+  el.modalInput.addEventListener('click', ev => { if (ev.target === el.modalInput) closeModal(el.modalInput); });
+  el.inputField.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); el.btnSaveInput.click(); } });
   el.modalConfirm.addEventListener('click', ev => { if (ev.target === el.modalConfirm) el.btnConfirmNo.click(); });
 
   // قائمة الخيارات
   el.optList.addEventListener('click', ev => { if (ev.target === el.optList) closeOptList(); });
 
   // الإرسال + إيقاف البث
-  el.composer.addEventListener('submit', ev => {
+  el.composer.addEventListener('submit', async ev => {
     ev.preventDefault();
     if (state.streaming) { el.input.blur(); state.abort && state.abort.abort(); return; }
-    // بلا مفتاح: نُبقي النص في الحقل ونفتح المودال (لا نضيع رسالة المستخدم)
-    if (!prefs.key) {
-      el.input.blur();
-      toast('أدخل مفتاح API من الإعدادات أولًا', 'err');
-      openModal(el.modalKey);
-      return;
-    }
     const txt = el.input.value.trim();
     if (!txt) return;
+    // بلا مفتاح/رابط/نموذج: يبقى النص في الحقل وتُفتح خانة الإكمال (لا نضيع رسالة المستخدم)
+    if (!(await readyProvider())) { el.input.blur(); return; }
     el.input.blur(); // سحب لوحة المفاتيح فور الإرسال
     el.input.value = '';
     el.input.style.height = 'auto';
@@ -785,7 +1031,7 @@ function bindEvents() {
   });
 
   // حالات الشبكة العامة
-  window.addEventListener('online', () => { if (prefs.key && state.conn !== 'busy') setConn('ok', 'متصل'); });
+  window.addEventListener('online', () => { if (pKey() && state.conn !== 'busy') setConn('ok', 'متصل'); });
   window.addEventListener('offline', () => setConn('err', 'لا يوجد اتصال بالإنترنت'));
 }
 

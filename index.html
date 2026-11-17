@@ -88,6 +88,10 @@ try{
         </div>
       </div>
       <form id="composer" autocomplete="off">
+        <button id="modelChip" class="chip model-chip" type="button" title="تغيير النموذج">
+          <span id="modelChipName">النموذج</span>
+          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M7 10l5 5 5-5z" fill="currentColor"/></svg>
+        </button>
         <textarea id="input" rows="1" placeholder="اكتب رسالتك هنا…"></textarea>
         <button id="btnSend" class="icon-btn send" type="submit" title="إرسال" aria-label="إرسال">
           <svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 11.5 21 3l-6.5 18-3.2-7.3L3 11.5z" fill="currentColor"/></svg>
@@ -116,13 +120,15 @@ try{
 <div class="sheet glass-surface" id="sheetSettings" hidden>
   <div class="sheet-grip"></div>
   <h2>الإعدادات</h2>
+  <div class="picker-row" id="rowProvider"><span class="pr-ico">🛰️</span><span class="pr-name">المقدم</span><span class="pr-val" id="valProvider">Google AI Studio</span></div>
+  <div class="picker-row" id="rowKey"><span class="pr-ico">🔑</span><span class="pr-name">مفتاح API</span><span class="pr-val" id="valKey">غير محفوظ</span></div>
+  <div class="picker-row" id="rowCustomBase" hidden><span class="pr-ico">🔗</span><span class="pr-name">رابط المقدم (Base URL)</span><span class="pr-val" id="valCustomBase">غير مضبوط</span></div>
+  <div class="picker-row" id="rowModel"><span class="pr-ico">🤖</span><span class="pr-name">النماذج</span><span class="pr-val" id="valModel">—</span></div>
   <div class="picker-row" id="rowTheme"><span class="pr-ico">🎨</span><span class="pr-name">المظهر</span><span class="pr-val" id="valTheme">داكن</span></div>
   <div class="picker-row" id="rowGlass"><span class="pr-ico">🧊</span><span class="pr-name">الزجاج</span><span class="pr-val" id="valGlass">ناعم</span></div>
   <div class="picker-row" id="rowBg"><span class="pr-ico">🌌</span><span class="pr-name">الخلفية</span><span class="pr-val" id="valBg">متحركة</span></div>
-  <div class="picker-row" id="rowModel"><span class="pr-ico">🤖</span><span class="pr-name">النموذج</span><span class="pr-val" id="valModel">gemini-2.5-flash</span></div>
-  <div class="picker-row" id="rowKey"><span class="pr-ico">🔑</span><span class="pr-name">مفتاح API</span><span class="pr-val" id="valKey">غير محفوظ</span></div>
   <div class="picker-row" id="rowUsage"><span class="pr-ico">📊</span><span class="pr-name">استخدام اليوم</span><span class="pr-val" id="valUsage">0 طلب</span></div>
-  <div class="picker-row static"><span class="pr-ico">ℹ️</span><span class="pr-name">الإصدار</span><span class="pr-val" id="valVersion">v1.0.0</span></div>
+  <div class="picker-row static"><span class="pr-ico">ℹ️</span><span class="pr-name">الإصدار</span><span class="pr-val" id="valVersion">v1.1.0</span></div>
 </div>
 
 <!-- قائمة اختيار (picker) -->
@@ -131,12 +137,25 @@ try{
 <!-- مودال مفتاح API -->
 <div class="modal-backdrop" id="modalKey" hidden>
   <div class="modal glass-surface" role="dialog" aria-modal="true">
-    <h3>مفتاح Gemini API</h3>
-    <p class="hint">الصق مفتاحك من Google AI Studio — يُحفظ على جهازك فقط.</p>
-    <input id="inputKey" type="password" dir="ltr" placeholder="AIza…">
+    <h3 id="keyTitle">مفتاح API</h3>
+    <p class="hint" id="keyHint">الصق مفتاحك — يُحفظ على جهازك فقط.</p>
+    <input id="inputKey" type="password" dir="ltr" placeholder="sk-… أو AIza…">
     <div class="modal-actions">
       <button class="btn ghost" type="button" data-close="modalKey">إلغاء</button>
       <button class="btn" type="button" id="btnSaveKey">حفظ</button>
+    </div>
+  </div>
+</div>
+
+<!-- مودال إدخال عام (إضافة نموذج / رابط المقدم الخاص) -->
+<div class="modal-backdrop" id="modalInput" hidden>
+  <div class="modal glass-surface" role="dialog" aria-modal="true">
+    <h3 id="inputTitle">إضافة</h3>
+    <p class="hint" id="inputHint"></p>
+    <input id="inputField" type="text" dir="ltr" placeholder="">
+    <div class="modal-actions">
+      <button class="btn ghost" type="button" data-close="modalInput">إلغاء</button>
+      <button class="btn" type="button" id="btnSaveInput">حفظ</button>
     </div>
   </div>
 </div>

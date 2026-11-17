@@ -283,12 +283,37 @@ main{flex:1;display:flex;flex-direction:column;min-height:0;position:relative;z-
 }
 .chip:active{transform:scale(.95)}
 
+/* شريحة تغيير النموذج في شريط الدردشة */
+.model-chip{
+  flex:none;min-width:44px;max-width:36%;height:44px;padding:0 12px;
+  gap:4px;font-variant-numeric:tabular-nums;
+  backdrop-filter:blur(var(--glass-blur)) saturate(148%);
+}
+.model-chip #modelChipName{
+  direction:ltr;text-align:left;max-width:100%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:ui-monospace,Consolas,monospace;font-size:12.5px;font-weight:700;
+}
+.model-chip svg{flex:none;opacity:.7}
+
+/* صفوف مدير النماذج */
+.opt .mname{direction:ltr;text-align:left;font-family:ui-monospace,Consolas,monospace;font-size:13px;word-break:break-all}
+.opt .del{
+  width:36px;height:36px;flex:none;border-radius:10px;border:1px solid var(--line);
+  background:transparent;color:var(--danger);cursor:pointer;font-size:16px;font-weight:800;
+  display:inline-flex;align-items:center;justify-content:center;
+  transition:background-color .2s var(--ease);
+}
+.opt .del:hover{background:rgba(255,107,122,.12)}
+.opt.add-opt{color:var(--accent);font-weight:800;border:1px dashed rgba(79,141,255,.45)}
+/* ==STYLES-APPEND== */
+
 /* ===== ورقة الإعدادات ===== */
 .sheet-backdrop,.modal-backdrop{
   position:fixed;inset:0;z-index:50;background:rgba(3,6,14,.5);
   opacity:0;transition:opacity .25s var(--ease);
 }
-.modal-backdrop{z-index:55;display:grid;place-items:center;padding:20px}
+.modal-backdrop{z-index:61;display:grid;place-items:center;padding:20px}
 .sheet-backdrop.show,.modal-backdrop.show{opacity:1}
 .sheet{
   position:fixed;right:0;left:0;bottom:0;z-index:52;
@@ -321,7 +346,7 @@ main{flex:1;display:flex;flex-direction:column;min-height:0;position:relative;z-
   position:fixed;z-index:58;left:50%;top:50%;transform:translate(-50%,-50%);
   width:min(92vw,420px);border-radius:var(--r-lg);border:1px solid var(--line);
   padding:10px;max-height:70dvh;overflow-y:auto;
-  animation:pop .25s var(--ease) both;
+  animation:popC .25s var(--ease) both;
 }
 .opt{
   display:flex;align-items:center;gap:10px;width:100%;min-height:48px;
@@ -403,6 +428,7 @@ main{flex:1;display:flex;flex-direction:column;min-height:0;position:relative;z-
 @keyframes viewIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @keyframes rowIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 @keyframes pop{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}
+@keyframes popC{from{opacity:0;transform:translate(-50%,-50%) scale(.9)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
 @keyframes floaty{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
 @keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
